@@ -1,14 +1,11 @@
-use std::sync::{Arc, Mutex};
-use crate::{errors::ServerError, server::{self, Server}};
-use std::collections::VecDeque;
-use crate::jsons::{payment_request::PaymentRequest, check_request::CheckRequest};
+use std::sync::Arc;
+use tokio::sync::Mutex;
+use crate::{errors::ServerError, server::Server};
 
 
 pub struct LoadBalancer{
-    servers : Arc<Mutex<Vec<Server>>>, //i could use a hashmap, but it cost more to the memory than a vector
+    servers : Arc<Mutex<Vec<Server>>>,
     round_robin_count: usize,
-    p_request_queue: Arc<Mutex<VecDeque<PaymentRequest>>>,
-    c_request_queue: Arc<Mutex<VecDeque<CheckRequest>>>,
 }
 
 
@@ -17,21 +14,11 @@ impl LoadBalancer{
         LoadBalancer{
             servers: Arc::new(Mutex::new(Vec::new())),
             round_robin_count : 0,
-            p_request_queue: Arc::new(Mutex::new(VecDeque::new())),
-            c_request_queue: Arc::new(Mutex::new(VecDeque::new())),
         }
     }
-
-
-    pub async fn select_server<F, T>(&mut self, f: F) -> Result<Option<T>, ServerError>
-    where
-        F: FnOnce(&mut Server) -> T,
+    pub async fn select_server(&mut self) -> Result<Option<Server>, ServerError>
     {
-        let mut servers = match self.servers.lock() {
-            Ok(svs) => svs,
-            Err(err) => return Err(ServerError::BalancerMutexError(err.to_string())),
-        };
-
+        let servers = self.servers.lock().await;
         let len = servers.len();
 
         if len == 0 {
@@ -42,79 +29,38 @@ impl LoadBalancer{
             self.round_robin_count = (self.round_robin_count + 1) % len;
             let idx = self.round_robin_count;
 
-            let is_alive = match servers[idx].check().await {
-                Ok(alive) => alive,
-                Err(err) => return Err(ServerError::SelectingServerError(err.to_string())),
-            };
-
-            if is_alive {
-                return Ok(Some(f(&mut servers[idx])));
+            if servers[idx].check().await {
+                return Ok(Some(servers[idx].clone()));
             }
         }
 
         Ok(None)
     }
 
-    pub fn add_server(&mut self, server: Server) -> Option<ServerError>{
-        match self.servers.lock(){
-            Ok(mut svs) => {
-                if let Err(err) = svs.try_reserve(1){
-                    return Some(ServerError::BalancerAddSVError(err.to_string()))
-                }
-                svs.push(server);
+
+    pub async fn add_server(&mut self, server: Server) -> Option<ServerError>{
+        match self.servers.lock().await.try_reserve(1){
+            Ok(_) => {
+                self.servers.lock().await.push(server);
             },
-            Err(err) => {
-                return Some(ServerError::BalancerAddSVError(err.to_string()))
-            }
-        };
-        None
-    }
-    pub fn remove_server(&mut self, address: String) -> Option<ServerError>{
-        match self.servers.lock(){
-            Ok(mut svs) => {
-                match svs.binary_search_by(|sv| sv.address.as_str().cmp(address.as_str())) {
-                    Ok(idx) => svs.remove(idx),
-                    Err(err) => {
-                        return Some(ServerError::BalancerAddSVError(err.to_string()))
-                    }
-                }
-            },
-            Err(err) => {
-                return Some(ServerError::BalancerAddSVError(err.to_string()))
-            }
+            Err(err) => return Some(ServerError::BalancerAddSVError(err.to_string()))           
         };
         None
     }
 
-    pub fn add_p_request(&mut self, p_request: PaymentRequest) -> Option<ServerError>{
-        match self.p_request_queue.lock(){
-            Ok(mut p_reqs) => {
-                if let Err(err) = p_reqs.try_reserve(1){
-                    return Some(ServerError::BalancerQueueError(err.to_string()))
-                }
-                p_reqs.push_back(p_request);
-            },
-            Err(err) => {
-                return Some(ServerError::BalancerQueueError(err.to_string()))
+    pub async fn remove_server(&mut self, address: String) -> Result<(),ServerError>{
+        let mut svs = self.servers.lock().await;
+
+        match svs.iter().position(|sv| sv.address == address){
+            None => return Err(ServerError::BalancerAddSVError("Server not found".to_string())),
+            Some(i) => {
+                svs.remove(i);
+               Ok(())
             }
-        };
-        None
+        }
     }
 
-    pub fn add_c_request(&mut self, c_request: CheckRequest) -> Option<ServerError>{
-        match self.c_request_queue.lock(){
-            Ok(mut c_reqs) => {
-                if let Err(err) = c_reqs.try_reserve(1){
-                    return Some(ServerError::BalancerQueueError(err.to_string()))
-                }
-                c_reqs.push_back(c_request);
-            },
-            Err(err) => {
-                return Some(ServerError::BalancerQueueError(err.to_string()))
-            }
-        };
-        None
-    }
 
     
 }
+

@@ -1,7 +1,7 @@
 use serde::{Deserialize, Serialize};
 
 
-#[derive(Debug,Deserialize, Serialize)]
+#[derive(Clone, Debug,Deserialize, Serialize)]
 pub struct PaymentRequest {
     pub amount: f64,
     pub currency: String,
