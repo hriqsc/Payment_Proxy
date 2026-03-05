@@ -1,2 +1,5 @@
 # Payment_Controller
-A simple implementation of a Payment Controller that will choose witch payment processor will process a payment
+this is a simple controller for a payment service
+
+# Based on
+this project is based on the Rinha de Backend witch you can learn more here: https://github.com/zanfranceschi/rinha-de-backend-2025/tree/main
