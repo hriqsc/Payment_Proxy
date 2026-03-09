@@ -3,8 +3,8 @@
     clippy::needless_return,
     clippy::unnecessary_operation
 )]
-use std::sync::Arc;
-use axum::{routing::post, routing::get, Router, Json, extract::State};
+use std::{collections::HashMap, sync::Arc};
+use axum::{Json, Router, extract::{Query, State}, routing::{get, post}};
 use jsons::{check_request::CheckRequest, payment_request::PaymentRequest};
 use reqwest::StatusCode;
 use tokio::sync::Mutex;
@@ -20,23 +20,48 @@ mod redis_handler;
 
 #[tokio::main]
 async fn main() {
-    println!("Hello, world!");
-    
-    match run_server().await{
-        Ok(_) => {},
-        Err(err) => {
-            println!("{}", err)
+    let df_address = std::env::var("DF_ADDRESS").unwrap();
+    let fb_address = std::env::var("FB_ADDRESS").unwrap();
+    let redis_address = std::env::var("REDIS_ADDRESS").unwrap();
+
+    let df_address_2 = df_address.clone();
+    let fb_address_2 = fb_address.clone();
+    let redis_address_2 = redis_address.clone();
+
+    let tunel = tokio::spawn(async move{
+        if let Err(err) = run_tunel(
+            df_address,
+            fb_address,
+            redis_address
+        ).await {
+            eprintln!("Tunel error: {}", err);
         }
+    });
+
+    let health = tokio::spawn(async move{
+        if let Err(err) = run_health_checker(
+            redis_address_2,
+            df_address_2,
+            fb_address_2
+        ).await {
+            eprintln!("Health checker error: {}", err);
+        }
+    });
+
+    if let Err(err) = tokio::try_join!(tunel, health) {
+        eprintln!("Task panicked: {}", err);
     }
 }
 
 
-async fn run_server() -> Result<(), ServerError>{
+async fn run_tunel(
+    df_address: String,
+    fb_address: String,
+    redis_address: String
+) -> Result<(), ServerError>{
     let lb = LoadBalancer::new().await;
     
-    let df_address = String::from("http://localhost:5000");
-    let fb_address = String::from("http://localhost:5001");
-    let redis_address = String::from("redis://127.0.0.1/");
+    
     let app_state : Arc<Mutex<AppState>> = Arc::new(Mutex::new(AppState::new(
         df_address,
          fb_address,
@@ -45,43 +70,15 @@ async fn run_server() -> Result<(), ServerError>{
     )?));
 
     let app = Router::new()
-        .route("/pagamentos", post(route_payment))
-        .route("/count", get(get_count))
+        .route("/payments", post(route_payment))
+        .route("/payments-summary", get(payments_summary))
         .with_state(app_state);
 
-    let listener = tokio::net::TcpListener::bind("0.0.0.0:9999").await?;
+    let listener = tokio::net::TcpListener::bind(std::env::var("BACKEND_ADDRESS")?).await?;
     axum::serve(listener, app).await?;
     Ok(())
 }
 
-pub async fn get_count(
-    State(state): State<Arc<Mutex<AppState>>>,
-) -> (StatusCode, Json<CheckRequest>) {
-    let redis_cli = state.lock().await.redis_client.clone();
-
-    let df_payments: isize = match redis_handler::get_df_payments(redis_cli.clone()).await {
-        Ok(payments) => payments.unwrap_or_default(),
-        Err(err) => {
-            eprintln!("Failed to get default payments: {}", err);
-            return (StatusCode::INTERNAL_SERVER_ERROR, Json(CheckRequest::default()));
-        }
-    };
-
-    let fb_payments: isize = match redis_handler::get_fb_payments(redis_cli.clone()).await {
-        Ok(payments) => payments.unwrap_or_default(),
-        Err(err) => {
-            eprintln!("Failed to get fallback payments: {}", err);
-            return (StatusCode::INTERNAL_SERVER_ERROR, Json(CheckRequest::default()));
-        }
-    };
-
-    let check = CheckRequest {
-        default: df_payments,
-        fallback: fb_payments,
-    };
-
-    (StatusCode::OK, Json(check))
-}
 
 pub async fn route_payment(
     State(state): State<Arc<Mutex<AppState>>>,
@@ -94,7 +91,7 @@ pub async fn route_payment(
 
     let maybe_server = lb.lock().await.select_server().await;
 
-    let server = match maybe_server {
+    let mut server = match maybe_server {
         Ok(Some(sv)) => sv,
         Ok(None) => {
             eprintln!("No healthy servers available");
@@ -106,13 +103,81 @@ pub async fn route_payment(
         }
     };
 
-    server.add_p_request(payload.clone()).await;
-
-    match server.process_p_request(state.clone()).await {
+    match server.process_request(state.clone(),payload.clone()).await {
         Ok(_) => StatusCode::ACCEPTED,
         Err(err) => {
             eprintln!("Failed to process payment: {}", err);
             StatusCode::INTERNAL_SERVER_ERROR
         }
     }
+}
+
+
+pub async fn payments_summary(
+    Query(params): Query<HashMap<String, String>>,
+    State(state): State<Arc<Mutex<AppState>>>,
+) -> (StatusCode, Json<CheckRequest>) {
+
+    let to : String = match params.get("to"){
+        Some(f) => f.to_string(),
+        None => return (StatusCode::BAD_REQUEST, Json(CheckRequest::default()))
+    };
+
+    let mut redis_con = match state.lock().await.redis_client.clone().get_connection(){
+        Ok(con) => con,
+        Err(_) => return (StatusCode::INTERNAL_SERVER_ERROR, Json(CheckRequest::default()))
+    };
+
+    let summary = match redis_handler::get_summary(&mut redis_con, params.get("from"), &to){
+        Ok(summary) => summary,
+        Err(_) => return (StatusCode::INTERNAL_SERVER_ERROR, Json(CheckRequest::default()))
+    };
+
+    (StatusCode::OK, Json(summary))
+}
+
+
+
+async fn run_health_checker(
+    redis_address: String,
+    df_address: String,
+    fb_address: String,
+) -> Result<(), ServerError>{
+
+    let hc_client = reqwest::Client::new();
+    loop{
+        let mut con = redis::Client::open(redis_address.clone())?.get_connection()?;
+
+        let df_resp = hc_client.get(df_address.clone()).send().await?;
+        let fb_resp = hc_client.get(fb_address.clone()).send().await?;
+
+        let df_hc : jsons::health_check::HealthCheck = df_resp.json().await?;
+        let fb_hc : jsons::health_check::HealthCheck = fb_resp.json().await?;
+
+        redis_handler::set_default_is_alive(&mut con, df_hc.failing)?;
+        redis_handler::set_fallback_is_alive(&mut con, fb_hc.failing)?;
+
+        let not_processed = redis_handler::get_not_processed(&mut con)?;
+
+        for payment in not_processed{
+            match server::handle_request(
+                payment.clone(),
+                &df_address,
+                &fb_address,
+                &hc_client,
+                &mut con, 
+            ).await{
+                Ok(_) => {},
+                Err(_) => {
+                    redis_handler::add_not_processed(
+                        &mut con, &payment
+                    )?;
+                }
+            };
+            //sleep so it doesnt make too many requests in a short time
+            tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+        }
+        tokio::time::sleep(std::time::Duration::from_secs(5)).await;
+    }
+
 }

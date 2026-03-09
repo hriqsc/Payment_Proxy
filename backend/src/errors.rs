@@ -1,10 +1,15 @@
-use std::sync::PoisonError;
+use std::{env::VarError, num::TryFromIntError, str::ParseBoolError, sync::PoisonError};
+
+use redis::RedisError;
+use tokio::task::JoinError;
 
 pub enum ServerError{
     //common errors
     MutexError(String),
     OtherError(String),
     MemoryNotAllocated(String),
+    EnvVarError(String),
+    ParseError(String),
     
     //server errors
     ServerNotAlive(String),
@@ -13,6 +18,8 @@ pub enum ServerError{
     BalancerMutexError(String),
     SelectingServerError(String),
     BalancerAddSVError(String),
+    BalancerRemoveSVError(String),
+    BalancerGetSVError(String),
     BalancerQueueError(String),
     BalancerEmptyServersError(String),
 
@@ -25,6 +32,8 @@ pub enum ServerError{
     
     //redis
     RedisClientError(String),
+    RedisError(String),
+
 
     JSONError(String),
     DatabaseError(String),
@@ -43,6 +52,8 @@ impl std::fmt::Display for ServerError {
             ServerError::SelectingServerError(err)      => format!("Selecting Server Error: {}", err),
             ServerError::BalancerMutexError(err)        => format!("Balancer Servers Mutex Error: {}", err),
             ServerError::BalancerAddSVError(err)        => format!("Balancer Add Server Error: {}", err),
+            ServerError::BalancerRemoveSVError(err)     => format!("Balancer Remove Server Error: {}", err),
+            ServerError::BalancerGetSVError(err)        => format!("Balancer Get Server Error: {}", err),
             ServerError::BalancerQueueError(err)        => format!("Balancer Queue Error: {}", err),
             ServerError::BalancerEmptyServersError(err) => format!("Balancer Empty Servers Error: {}", err),
             ServerError::ReqErrorGeneric(err)           => format!("Request Error: {}", err),
@@ -50,11 +61,24 @@ impl std::fmt::Display for ServerError {
             ServerError::AxumCommonErr(err)             => format!("Axum Common Error: {}", err),
             ServerError::AxumIOError(err)               => format!("Axum IO Error: {}", err),
             ServerError::RedisClientError(err)          => format!("Redis Client Error: {}", err),
+            ServerError::RedisError(err)                => format!("Redis Error: {}", err),
+            ServerError::EnvVarError(err)               => format!("Env Var Error: {}", err),
+            ServerError::ParseError(err)                => format!("Parse Error: {}", err),
         })
     }
 }
 
+impl From<VarError> for ServerError {
+    fn from(err: VarError) -> Self {
+        ServerError::EnvVarError(err.to_string())
+    }
+}
 
+impl From<RedisError> for ServerError {
+    fn from(err: RedisError) -> Self {
+        ServerError::RedisError(err.to_string())
+    }
+}
 
 impl<T> From<PoisonError<T>> for ServerError {
     fn from(err: PoisonError<T>) -> Self {
@@ -82,9 +106,28 @@ impl From<std::io::Error> for ServerError {
     }
 }
 
-impl From<redis::RedisError> for ServerError {
-    fn from(err: redis::RedisError) -> Self {
-        ServerError::RedisClientError(err.to_string())
+
+impl From<TryFromIntError> for ServerError {
+    fn from(err: TryFromIntError) -> Self {
+        ServerError::ParseError(err.to_string())
     }
-    
+}
+
+
+impl From<ParseBoolError> for ServerError {
+    fn from(err: ParseBoolError) -> Self {
+        ServerError::ParseError(err.to_string())
+    }
+}
+
+impl From<serde_json::Error> for ServerError {
+    fn from(err: serde_json::Error) -> Self {
+        ServerError::JSONError(err.to_string())
+    }
+}
+
+impl From<JoinError> for ServerError {
+    fn from(err: JoinError) -> Self {
+        ServerError::ReqErrorGeneric(err.to_string())
+    }
 }

@@ -1,33 +1,22 @@
-use std::{collections::VecDeque, sync::Arc};
-
-use redis::Commands;
+use std::sync::Arc;
 use tokio::sync::{Mutex};
-use crate::{app_state, errors::ServerError, jsons::{check_request::CheckRequest, payment_request::PaymentRequest}, redis_handler};
-
-pub enum PaymentProcessor{
-    Default,
-    Fallback,
-    Error,
-}
+use crate::{app_state, errors::ServerError, jsons::payment_request::PaymentRequest, redis_handler};
 
 #[derive(Clone)]
 pub struct Server{
-    pub address: String,
+    pub id: usize,
     pub is_alive: Arc<Mutex<bool>>,
     pub weight: usize,
-    pub p_request_queue: Arc<Mutex<VecDeque<PaymentRequest>>>,
-    pub c_request_queue: Arc<Mutex<VecDeque<CheckRequest>>>,
 }
 
+pub const PAYMENT_ENDPOINT: &str = "/payment";
 
 impl Server{
-    pub async fn new(address: String, weight: usize) -> Server{
+    pub async fn new(id: usize, weight: usize) -> Server{
         Server{
-            address,
+            id,
             is_alive: Arc::new(Mutex::new(true)),
             weight,
-            p_request_queue: Arc::new(Mutex::new(VecDeque::new())),
-            c_request_queue: Arc::new(Mutex::new(VecDeque::new())),
         }
     }
     pub async fn check(&self) -> bool{
@@ -38,119 +27,90 @@ impl Server{
         self.weight >= 10000
     }
 
-    pub async fn add_p_request(&self, p_req : PaymentRequest){
-        let mut p_req_qe  = self.p_request_queue.lock().await;
-        match p_req_qe.try_reserve(1){
-            Ok(_) => {
-                p_req_qe.push_back(p_req);
-            },
-            Err(err) => {
-                println!("{}", err);
-            }
-        }
-    }
 
-    pub async fn add_c_request(&self, c_req : CheckRequest) -> Result<(),ServerError>{
-        let mut c_req_qe  = self.c_request_queue.lock().await;
-        match c_req_qe.try_reserve(1){
-            Ok(_) => {
-                c_req_qe.push_back(c_req);
-                Ok(())
-            },
-            Err(err) => {
-                Err(ServerError::MemoryNotAllocated(err.to_string()))
-            }
-        }
-    }
-
-    pub async fn process_p_request(
-        &self,
-        app_state : Arc<Mutex<app_state::AppState>>
+    pub async fn process_request(
+        &mut self,
+        app_state : Arc<Mutex<app_state::AppState>>,
+        p_req : PaymentRequest
     ) -> Result<(),ServerError>{
-        
-        let p_req = match self.p_request_queue.lock().await.pop_front(){
-            Some(p_req) => p_req,
-            None => return Ok(()),
+        let (default_addr, fallback_addr,sv_client,mut redis_con) = {
+            let app = app_state.lock().await;
+            (
+                app.default_address.clone(),
+                app.fallback_address.clone(),
+                app.server_client.clone(),
+                app.redis_client.clone().get_connection()?
+            )
         };
-        let queue = self.p_request_queue.clone();
 
-        tokio::spawn(async move{
-            let rs = handle_request(app_state.clone(), p_req.clone()).await;
-            let mut success : bool = true;
+        self.weight += 1;
 
-            match rs{
-                Ok(payment_processor) => {
-                    match payment_processor{
-                        PaymentProcessor::Default => {
+        let rs = handle_request(
+            p_req.clone(),
+            &default_addr,
+            &fallback_addr,
+            &sv_client,
+            &mut redis_con
+        ).await;
 
-                        },
-                        PaymentProcessor::Fallback => {
+        self.weight -= 1;
 
-                        },
-                        PaymentProcessor::Error => success = false,
-                    }
-                },
-                Err(_) => success = false,
-            }
-            if !success{
-                let mut qe = queue.lock().await;
-                    
-                match qe.try_reserve(1){
-                    Ok(_) => {
-                        qe.push_back(p_req);
-                    },
-                    Err(err) => {
-                        ServerError::BalancerQueueError(err.to_string());
-                    }
-                };
-            }
-        });
-        
+        if let Err(err) = rs{
+            redis_handler::add_not_processed(&mut redis_con, &p_req)?;
+            return Err(err)
+        }
+
         Ok(())
     }
 }
 
 
-
 pub async fn handle_request(
-    app_state : Arc<Mutex<app_state::AppState>>,
-    p_req : PaymentRequest
-) -> Result<PaymentProcessor,ServerError>{
-    let (default_addr, fallback_addr, default_client, fallback_client, redis_cli) = {
-        let app = app_state.lock().await;
-        (
-            app.default_address.clone(),
-            app.fallback_address.clone(),
-            app.default_client.clone(),
-            app.fallback_client.clone(),
-            app.redis_client.clone(),
-        )
-    };
+    p_req : PaymentRequest,
+    default_addr : &str,
+    fallback_addr : &str,
+    sv_client : &reqwest::Client,
+    redis_con : &mut redis::Connection
+) -> Result<(),ServerError>{
+    
+    //tries to send to default processor
+    let df_is_alive = redis_handler::get_default_is_alive(redis_con)?;
+    if df_is_alive{
+        let req_builder = sv_client
+            .post(format!("{}{}", default_addr, PAYMENT_ENDPOINT))
+            .body(serde_json::to_string(&p_req)?);
 
-    let default_response = 
-        default_client
-        .post(default_addr.clone())
-        .json(&p_req)
+        //attempts to send 3 times
+        for _ in 0..3{
+            let restult = match req_builder.try_clone(){
+                Some(rb) => rb.send().await?,
+                None => return Err(ServerError::ReqErrorGeneric("Failed to clone request builder".to_string()))
+            };
+            if restult.status().is_success(){
+                redis_handler::add_payment(redis_con, true, p_req.amount)?;
+                return Ok(());
+            }else{
+                tokio::time::sleep(tokio::time::Duration::from_millis(250)).await;
+            }
+        }
+    }
+
+    //if default could not process, tries to send to fallback
+    let fb_is_alive = redis_handler::get_fallback_is_alive(redis_con)?;
+    if fb_is_alive{
+        let restult = sv_client.post(format!("{}{}", fallback_addr, PAYMENT_ENDPOINT))
+        .body(serde_json::to_string(&p_req)?)
         .send()
         .await?;
 
-
-    if default_response.status().is_success(){
-        redis_handler::inc_df_payments(&redis_cli).await?;
-        return Ok(PaymentProcessor::Default);
+        if restult.status().is_success(){
+            redis_handler::add_payment(redis_con, false, p_req.amount)?;
+            return Ok(());
+        }
+        else{
+            return Err(ServerError::ReqErrorGeneric(restult.status().to_string()));
+        }
     }
 
-    let fallback_response = 
-        fallback_client
-        .post(fallback_addr.clone())
-        .json(&p_req)
-        .send()
-        .await?;
-
-    if fallback_response.status().is_success(){
-        redis_handler::inc_fb_payments(&redis_cli).await?;
-        return Ok(PaymentProcessor::Fallback);
-    }
-
-    Ok(PaymentProcessor::Error)
+    Err(ServerError::BalancerQueueError("Was unable to process request".to_string()))
 }
