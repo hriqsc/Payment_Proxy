@@ -9,7 +9,7 @@ pub struct Server{
     pub weight: usize,
 }
 
-pub const PAYMENT_ENDPOINT: &str = "/payment";
+pub const PAYMENT_ENDPOINT: &str = "/payments";
 
 impl Server{
     pub async fn new(id: usize, weight: usize) -> Server{
@@ -55,9 +55,8 @@ impl Server{
 
         self.weight -= 1;
 
-        if let Err(err) = rs{
+        if rs.is_err(){
             redis_handler::add_not_processed(&mut redis_con, &p_req)?;
-            return Err(err)
         }
 
         Ok(())

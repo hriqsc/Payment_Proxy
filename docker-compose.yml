@@ -85,27 +85,43 @@ services:
       - postgres-socket-02:/var/run/postgresql
 
   redis:
-    image: redis:7-alpine 
+    image: redis:7-alpine
     restart: always
+    networks:
+      - payment-processor
     ports:
       - "6379:6379"
-  
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+      start_period: 5s
+
   backend:
+    image: alpine:3.20
+    working_dir: /app
+    volumes:
+      - ./build:/app
+    command: ["./backend"]
     deploy:
       resources:
         limits:
           cpus: "1.5"
           memory: "350MB"
-    build:
-      context: ./backend
     environment:
-      - DF_ADDRESS=http://localhost:8001
-      - FB_ADDRESS=http://localhost:8002
+      - DF_ADDRESS=http://payment-processor-default:8080
+      - FB_ADDRESS=http://payment-processor-fallback:8080
       - REDIS_ADDRESS=redis://redis:6379
       - BACKEND_ADDRESS=0.0.0.0:8080
     ports:
       - "8080:8080"
     restart: unless-stopped
+    networks:
+    - payment-processor
+    depends_on:
+      redis:
+        condition: service_healthy
 
 networks:
   payment-processor:
