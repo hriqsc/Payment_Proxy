@@ -1,0 +1,1 @@
+GET http://localhost:8080/payments-summary?from=2026-01-10T12:34:56.000Z&to=2026-12-31T23:59:59.000Z HTTP/1.1
