@@ -34,7 +34,7 @@ async fn main() {
         fb_address.clone(),
     ).await;
 
-    println!("Services are up, starting proxy");
+    println!("proxy initiated...");
 
     let tunel = tokio::spawn(async move{
         if let Err(err) = run_tunel(
@@ -111,7 +111,7 @@ pub async fn route_payment(
     };
 
     match server.process_request(state.clone(),payload.clone()).await {
-        Ok(_) => StatusCode::ACCEPTED,
+        Ok(_) => StatusCode::OK,
         Err(err) => {
             eprintln!("Failed to process payment: {}", err);
             StatusCode::INTERNAL_SERVER_ERROR
@@ -214,7 +214,6 @@ async fn wait_for_services(redis_address: String, df_address: String, fb_address
         let fb_ok = http_client.get(fb_address.as_str()).send().await.is_ok();
 
         if redis_ok && df_ok && fb_ok {
-            println!("All services are up, starting server...");
             break;
         }
 
