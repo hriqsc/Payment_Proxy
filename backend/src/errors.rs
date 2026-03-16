@@ -4,6 +4,7 @@ use redis::RedisError;
 use tokio::task::JoinError;
 
 /// Central error type used across the server, load balancer, and infrastructure layers.
+#[derive(Debug)]
 pub enum ServerError{
     //common errors
 
@@ -109,79 +110,83 @@ impl std::fmt::Display for ServerError {
     }
 }
 
-/// Converts `VarError` (environment variable errors) into `ServerError`.
 impl From<VarError> for ServerError {
     fn from(err: VarError) -> Self {
         ServerError::EnvVarError(err.to_string())
     }
 }
 
-/// Converts Redis client errors into `ServerError`.
 impl From<RedisError> for ServerError {
     fn from(err: RedisError) -> Self {
         ServerError::RedisError(err.to_string())
     }
 }
 
-/// Converts poisoned mutex errors into `ServerError`.
 impl<T> From<PoisonError<T>> for ServerError {
     fn from(err: PoisonError<T>) -> Self {
         ServerError::MutexError(err.to_string())
     }
 }
 
-/// Converts HTTP request errors (`reqwest`) into `ServerError`.
 impl From<reqwest::Error> for ServerError {
     fn from(err: reqwest::Error) -> Self {
         ServerError::ReqErrorGeneric(err.to_string())
     }
 }
 
-/// Converts Axum framework errors into `ServerError`.
 impl From<axum::Error> for ServerError {
     fn from(err: axum::Error) -> Self {
         ServerError::AxumCommonErr(err.to_string())
     }
 }
 
-/// Converts standard IO errors into `ServerError`.
 impl From<std::io::Error> for ServerError {
     fn from(err: std::io::Error) -> Self {
         ServerError::AxumIOError(err.to_string())
     }
 }
 
-/// Converts integer conversion errors into `ServerError`.
 impl From<TryFromIntError> for ServerError {
     fn from(err: TryFromIntError) -> Self {
         ServerError::ParseError(err.to_string())
     }
 }
 
-/// Converts boolean parsing errors into `ServerError`.
 impl From<ParseBoolError> for ServerError {
     fn from(err: ParseBoolError) -> Self {
         ServerError::ParseError(err.to_string())
     }
 }
 
-/// Converts JSON serialization/deserialization errors into `ServerError`.
 impl From<serde_json::Error> for ServerError {
     fn from(err: serde_json::Error) -> Self {
         ServerError::JSONError(err.to_string())
     }
 }
 
-/// Converts asynchronous task join errors into `ServerError`.
 impl From<JoinError> for ServerError {
     fn from(err: JoinError) -> Self {
         ServerError::ReqErrorGeneric(err.to_string())
     }
 }
 
-/// Converts RFC3339 timestamp parsing errors into `ServerError`.
 impl From<chrono::ParseError> for ServerError {
     fn from(err: chrono::ParseError) -> Self {
         ServerError::ParseError(err.to_string())
+    }
+}
+
+
+
+impl From<deadpool_redis::PoolError> for ServerError {
+    fn from(err: deadpool_redis::PoolError) -> Self {
+        ServerError::RedisClientError(err.to_string())
+    }
+}
+
+
+impl From<deadpool_redis::redis::RedisError> for ServerError {
+    fn from(err: deadpool_redis::redis::RedisError) -> Self {
+        ServerError::RedisError(err.to_string())
     }
 }

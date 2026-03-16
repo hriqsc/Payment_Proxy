@@ -1,3 +1,4 @@
+use chrono::{SecondsFormat, Utc};
 use serde::{Deserialize, Serialize};
 
 
@@ -36,6 +37,21 @@ pub struct ProcessorPRequest{
     pub requested_at : String
 }
 
+impl ProcessorPRequest{
+    pub fn new(payment: &PaymentRequest) -> ProcessorPRequest {
+        let requested_at = 
+            Utc::now()
+            .to_rfc3339_opts(
+                SecondsFormat::Millis, 
+                true
+            );
+        ProcessorPRequest { 
+            amount: payment.amount,
+            id: payment.id.clone(),
+            requested_at
+        }
+    }
+}
 
 
 /*

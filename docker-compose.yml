@@ -87,10 +87,14 @@ services:
   redis:
     image: redis:7-alpine
     restart: always
+    command: redis-server --save "" --appendonly no --maxmemory 60mb --maxmemory-policy allkeys-lru
     networks:
       - payment-processor
-    ports:
-      - "6379:6379"
+    deploy:
+      resources:
+        limits:
+          cpus: "0.25"
+          memory: "80MB"
     healthcheck:
       test: ["CMD", "redis-cli", "ping"]
       interval: 5s
@@ -109,6 +113,10 @@ services:
         limits:
           cpus: "1.5"
           memory: "350MB"
+    ulimits:
+      nofile:
+        soft: 65536
+        hard: 65536
     environment:
       - DF_ADDRESS=http://payment-processor-default:8080
       - FB_ADDRESS=http://payment-processor-fallback:8080
@@ -118,7 +126,7 @@ services:
       - "8080:8080"
     restart: unless-stopped
     networks:
-    - payment-processor
+      - payment-processor
     depends_on:
       redis:
         condition: service_healthy
